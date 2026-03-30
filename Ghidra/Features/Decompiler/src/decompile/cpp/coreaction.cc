@@ -4712,13 +4712,12 @@ void ActionSparseSwitch::transformToSwitch(Funcdata &data,vector<ChainEntry> &ch
 
   // Step 2: Disconnect intermediate CMP blocks from the graph.
   //         All targets in the chain have sizeIn==1 (checked in detectChain), so there
-  //         are no MULTIEQUALs to patch — raw removeEdge is sufficient.
-  //         Destroy each intermediate CBRANCH directly to avoid removeBranch, which
-  //         calls structureReset on every invocation.
-  //         The disconnected blocks (with their remaining non-branch PcodeOps) will be
-  //         properly cleaned up by ActionUnreachable on the next pass through actmainloop.
+  //         are no MULTIEQUALs to patch — raw removeEdge is sufficient for most blocks.
+  //         Use removeBranch for the last intermediate block to trigger exactly one
+  //         structureReset, which is needed for removeUnreachableBlocks in Step 7.
   bblocks.removeEdge(headBlock,(FlowBlock *)chain[1].cmpBlock);
-  for(int4 i=1;i<(int4)chain.size();++i) {
+  int4 lastIntermediate = (int4)chain.size() - 1;
+  for(int4 i=1;i<lastIntermediate;++i) {
     BlockBasic *cmpBlock = chain[i].cmpBlock;
     PcodeOp *cbranch = cmpBlock->lastOp();
     if (cbranch != (PcodeOp *)0 && cbranch->code() == CPUI_CBRANCH)
@@ -4727,6 +4726,17 @@ void ActionSparseSwitch::transformToSwitch(Funcdata &data,vector<ChainEntry> &ch
       bblocks.removeEdge(cmpBlock,cmpBlock->getOut(0));
     while(cmpBlock->sizeIn() > 0)
       bblocks.removeEdge(cmpBlock->getIn(0),cmpBlock);
+  }
+  // Last intermediate block: use removeBranch (triggers one structureReset).
+  // removeBranch on a block with sizeOut==2 destroys the CBRANCH and removes one edge.
+  {
+    BlockBasic *lastCmp = chain[lastIntermediate].cmpBlock;
+    data.removeBranch(lastCmp,chain[lastIntermediate].caseEdge);
+    // CBRANCH is now destroyed, sizeOut==1.  Remove remaining edge.
+    if (lastCmp->sizeOut() > 0)
+      data.removeBranch(lastCmp,0);
+    while(lastCmp->sizeIn() > 0)
+      bblocks.removeEdge(lastCmp->getIn(0),lastCmp);
   }
 
   // Step 4: Add edges from headBlock to all case targets and default.
@@ -4760,9 +4770,13 @@ void ActionSparseSwitch::transformToSwitch(Funcdata &data,vector<ChainEntry> &ch
   jt->initSparse(firstCbranch,addrs,labs);
   data.addJumpTable(jt);
 
-  // Step 7: Reset the structuring so it picks up the new switch.
-  //         The disconnected intermediate blocks will be cleaned up by ActionUnreachable
-  //         on the next pass through the main action loop.
+  // Step 7: Remove the now-unreachable intermediate comparison blocks.
+  //         The structureReset triggered by removeBranch above recomputed dominators,
+  //         so removeUnreachableBlocks can find blocks with NULL immed_dom.
+  //         Pass issuewarning=false: the dead blocks are expected, not suspicious.
+  data.removeUnreachableBlocks(false,true);
+
+  // Step 8: Reset the structuring so it picks up the new switch.
   data.getStructure().clear();
 }
 
