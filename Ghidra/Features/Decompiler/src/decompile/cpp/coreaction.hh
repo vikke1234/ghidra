@@ -614,6 +614,33 @@ public:
   virtual int4 apply(Funcdata &data);
 };
 
+/// \brief Detect and transform sparse switch statements implemented as if-else chains.
+///
+/// When a compiler implements a switch as a chain of compare-and-branch instructions
+/// (CMP + CBRANCH) testing the same variable against different constants, this action
+/// detects the chain and transforms it into a single BRANCHIND with a JumpTable.
+/// This allows the normal switch structuring machinery to handle it.
+class ActionSparseSwitch : public Action {
+  static const int4 MIN_SPARSE_CASES;		///< Minimum number of cases to recognize as a switch
+  /// \brief Information about one comparison block in the chain
+  struct ChainEntry {
+    BlockBasic *cmpBlock;	///< The comparison basic block
+    BlockBasic *caseBody;	///< The case body block reached when the comparison matches
+    uintb caseLabel;		///< The constant value being compared against
+    int4 caseEdge;		///< Which out-edge (0 or 1) goes to the case body
+  };
+  static Varnode *traceVarnodeBack(Varnode *vn);	///< Trace a Varnode back through COPY operations
+  static bool detectChain(BlockBasic *head,vector<ChainEntry> &chain,BlockBasic *&defaultBlock);
+  static void transformToSwitch(Funcdata &data,vector<ChainEntry> &chain,BlockBasic *defaultBlock);
+public:
+  ActionSparseSwitch(const string &g) : Action(0,"sparseswitch",g) {}	///< Constructor
+  virtual Action *clone(const ActionGroupList &grouplist) const {
+    if (!grouplist.contains(getGroup())) return (Action *)0;
+    return new ActionSparseSwitch(getGroup());
+  }
+  virtual int4 apply(Funcdata &data);
+};
+
 /// \brief Prepare function prototypes for "normalize" simplification.
 ///
 /// The "normalize" simplification style has the fundamental requirement that the input parameter

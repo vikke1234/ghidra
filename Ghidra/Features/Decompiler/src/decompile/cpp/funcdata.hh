@@ -543,11 +543,13 @@ public:
   int4 numJumpTables(void) const { return jumpvec.size(); }	///< Get the number of jump-tables for \b this function
   JumpTable *getJumpTable(int4 i) { return jumpvec[i]; }	///< Get the i-th jump-table
   void removeJumpTable(JumpTable *jt);			///< Remove/delete the given jump-table
+  void addJumpTable(JumpTable *jt) { jumpvec.push_back(jt); }	///< Add a pre-built jump-table
 
   // Block routines
   BlockGraph &getStructure(void) { return sblocks; } 	///< Get the current control-flow structuring hierarchy
   const BlockGraph &getStructure(void) const { return sblocks; }	///< Get the current control-flow structuring hierarchy
   const BlockGraph &getBasicBlocks(void) const { return bblocks; }	///< Get the basic blocks container
+  BlockGraph &getBasicBlocksRef(void) { return bblocks; }		///< Get a modifiable reference to the basic blocks
 
   /// \brief Set the initial ownership range for the given basic block
   ///

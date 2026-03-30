@@ -2607,6 +2607,44 @@ void JumpTable::foldInNormalization(Funcdata *fd)
   }
 }
 
+/// Initialize the jump-table for a sparse switch that was detected from an if-else chain.
+/// The address table, labels, and block-to-address mapping are set up directly.
+/// The out-edges of the BRANCHIND's parent block must already be set up to match
+/// the address table entries (1-to-1, in order).
+/// \param ind is the BRANCHIND PcodeOp for the switch
+/// \param addrs is the list of target addresses (one per case, including default)
+/// \param labs is the list of case labels (one per case, parallel to addrs)
+void JumpTable::initSparse(PcodeOp *ind,const vector<Address> &addrs,const vector<uintb> &labs)
+
+{
+  indirect = ind;
+  opaddress = ind->getAddr();
+  addresstable = addrs;
+  label = labs;
+  switchVarConsume = ~((uintb)0);
+  partialTable = false;
+  collectloads = false;
+  defaultIsFolded = false;
+
+  // Build trivial 1-to-1 block2addr mapping (out-edge i corresponds to addresstable[i])
+  FlowBlock *parent = indirect->getParent();
+  block2addr.clear();
+  block2addr.reserve(addresstable.size());
+  if ((int4)parent->sizeOut() != (int4)addresstable.size())
+    throw LowlevelError("Sparse switch: address table size does not match out-edge count");
+  for(int4 i=0;i<(int4)addresstable.size();++i)
+    block2addr.push_back(IndexPair(i,i));
+  lastBlock = addresstable.size()-1;
+
+  // Default is the last entry (the chain's fallthrough target)
+  defaultBlock = addresstable.size()-1;
+
+  // Use trivial model since recovery is already done
+  if (jmodel != (JumpModel *)0) delete jmodel;
+  jmodel = new JumpModelTrivial(this);
+  jmodel->recoverModel((Funcdata *)0,indirect,addresstable.size(),addresstable.size());
+}
+
 /// Make exactly one case for each output edge of the switch block.
 void JumpTable::trivialSwitchOver(void)
 

@@ -621,6 +621,7 @@ public:
   void matchModel(Funcdata *fd);		///< Try to match JumpTable model to the existing function
   void recoverLabels(Funcdata *fd);		///< Recover the case labels for \b this jump-table
   bool checkForMultistage(Funcdata *fd);	///< Check if this jump-table requires an additional recovery stage
+  void initSparse(PcodeOp *ind,const vector<Address> &addrs,const vector<uintb> &labs);	///< Initialize for a sparse switch
   void clear(void);				///< Clear instance specific data for \b this jump-table
   void encode(Encoder &encoder) const;		///< Encode \b this jump-table as a \<jumptable> element
   void decode(Decoder &decoder);		///< Decode \b this jump-table from a \<jumptable> element

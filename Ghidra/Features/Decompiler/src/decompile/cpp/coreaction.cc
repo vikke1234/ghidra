@@ -4556,6 +4556,242 @@ int4 ActionConditionalConst::apply(Funcdata &data)
   return 0;
 }
 
+const int4 ActionSparseSwitch::MIN_SPARSE_CASES = 3;
+
+/// Trace a Varnode back through COPY and INT_ZEXT operations to find the original variable.
+/// \param vn is the Varnode to trace
+/// \return the original Varnode (possibly \b vn itself)
+Varnode *ActionSparseSwitch::traceVarnodeBack(Varnode *vn)
+
+{
+  while(vn->isWritten()) {
+    PcodeOp *op = vn->getDef();
+    OpCode opc = op->code();
+    if (opc == CPUI_COPY || opc == CPUI_INT_ZEXT || opc == CPUI_INT_SEXT)
+      vn = op->getIn(0);
+    else
+      break;
+  }
+  return vn;
+}
+
+/// Try to detect a chain of compare-and-branch blocks starting at the given block.
+/// Each block in the chain compares the same variable against a constant using INT_EQUAL,
+/// then branches to a case body (on match) or the next comparison (on mismatch).
+/// \param head is the starting basic block
+/// \param chain will hold the detected chain entries
+/// \param defaultBlock will hold the block reached when no case matches
+/// \return \b true if a valid chain of sufficient length was detected
+bool ActionSparseSwitch::detectChain(BlockBasic *head,vector<ChainEntry> &chain,BlockBasic *&defaultBlock)
+
+{
+  chain.clear();
+  defaultBlock = (BlockBasic *)0;
+  Varnode *switchVar = (Varnode *)0;
+  BlockBasic *cur = head;
+
+  while(cur != (BlockBasic *)0) {
+    if (cur->sizeOut() != 2) break;
+
+    PcodeOp *lastop = cur->lastOp();
+    if (lastop == (PcodeOp *)0 || lastop->code() != CPUI_CBRANCH) break;
+
+    Varnode *condVn = lastop->getIn(1);
+    if (!condVn->isWritten()) break;
+    PcodeOp *condOp = condVn->getDef();
+
+    // Handle BOOL_NEGATE wrapper
+    bool negated = false;
+    if (condOp->code() == CPUI_BOOL_NEGATE) {
+      negated = true;
+      condVn = condOp->getIn(0);
+      if (!condVn->isWritten()) break;
+      condOp = condVn->getDef();
+    }
+
+    // Must be INT_EQUAL or INT_NOTEQUAL
+    bool isEqual;
+    if (condOp->code() == CPUI_INT_EQUAL)
+      isEqual = true;
+    else if (condOp->code() == CPUI_INT_NOTEQUAL)
+      isEqual = false;
+    else
+      break;
+    if (negated) isEqual = !isEqual;
+
+    // One operand must be a constant
+    Varnode *varVn;
+    uintb constVal;
+    if (condOp->getIn(1)->isConstant()) {
+      varVn = condOp->getIn(0);
+      constVal = condOp->getIn(1)->getOffset();
+    }
+    else if (condOp->getIn(0)->isConstant()) {
+      varVn = condOp->getIn(1);
+      constVal = condOp->getIn(0)->getOffset();
+    }
+    else
+      break;
+
+    // Verify same switch variable across the chain (trace through COPYs)
+    Varnode *rootVn = traceVarnodeBack(varVn);
+    if (switchVar == (Varnode *)0)
+      switchVar = rootVn;
+    else if (traceVarnodeBack(switchVar) != rootVn)
+      break;
+
+    // Determine which out-edge is the case body (match) vs chain continuation (no match)
+    // CBRANCH: out[0] = false branch, out[1] = true branch
+    // If equal and not flipped: true branch = match
+    bool branchOnTrue = isEqual;
+    if (lastop->isBooleanFlip()) branchOnTrue = !branchOnTrue;
+
+    int4 caseEdge = branchOnTrue ? 1 : 0;
+    int4 chainEdge = 1 - caseEdge;
+
+    BlockBasic *caseBody = (BlockBasic *)cur->getOut(caseEdge);
+    BlockBasic *nextCmp = (BlockBasic *)cur->getOut(chainEdge);
+
+    // Case body must only be reachable from this comparison
+    if (caseBody->sizeIn() != 1) break;
+
+    ChainEntry entry;
+    entry.cmpBlock = cur;
+    entry.caseBody = caseBody;
+    entry.caseLabel = constVal;
+    entry.caseEdge = caseEdge;
+    chain.push_back(entry);
+
+    // Next block in chain must also be a single-entry block (except possibly the last/default)
+    if (nextCmp->sizeIn() != 1) {
+      defaultBlock = nextCmp;
+      break;
+    }
+    cur = nextCmp;
+  }
+
+  // Set default if we exited the loop normally (cur failed the pattern)
+  if (defaultBlock == (BlockBasic *)0 && chain.size() > 0) {
+    ChainEntry &last = chain.back();
+    int4 chainEdge = 1 - last.caseEdge;
+    defaultBlock = (BlockBasic *)last.cmpBlock->getOut(chainEdge);
+  }
+
+  return ((int4)chain.size() >= MIN_SPARSE_CASES);
+}
+
+/// Transform a detected compare-and-branch chain into a single BRANCHIND with a JumpTable.
+/// This rewires the basic block graph so that the head block has out-edges to all case targets,
+/// creates a BRANCHIND in the head block, and sets up a JumpTable with the case labels.
+/// Intermediate comparison blocks become unreachable dead code.
+/// \param data is the function being analyzed
+/// \param chain is the detected chain of comparison blocks
+/// \param defaultBlock is the block reached when no case matches
+void ActionSparseSwitch::transformToSwitch(Funcdata &data,vector<ChainEntry> &chain,BlockBasic *defaultBlock)
+
+{
+  BlockBasic *headBlock = chain[0].cmpBlock;
+  BlockGraph &bblocks = data.getBasicBlocksRef();
+
+  // Collect the switch variable from the first comparison
+  PcodeOp *firstCbranch = headBlock->lastOp();
+  Varnode *condVn = firstCbranch->getIn(1);
+  PcodeOp *condOp = condVn->getDef();
+  if (condOp->code() == CPUI_BOOL_NEGATE)
+    condOp = condOp->getIn(0)->getDef();
+  // condOp is the INT_EQUAL/INT_NOTEQUAL; get the variable operand
+  Varnode *switchVn = condOp->getIn(0)->isConstant() ? condOp->getIn(1) : condOp->getIn(0);
+
+  // Step 1: Add edges from headBlock to case bodies that aren't already direct out-edges,
+  //         and to the default block.  Collect addresses and labels in order.
+  vector<Address> addrs;
+  vector<uintb> labs;
+
+  // First entry: headBlock's own case body (already has an edge)
+  addrs.push_back(chain[0].caseBody->getStart());
+  labs.push_back(chain[0].caseLabel);
+
+  // Remaining entries: add new edges from headBlock
+  for(int4 i=1;i<(int4)chain.size();++i) {
+    addrs.push_back(chain[i].caseBody->getStart());
+    labs.push_back(chain[i].caseLabel);
+    bblocks.addEdge(headBlock,chain[i].caseBody);
+  }
+
+  // Default block as last entry
+  addrs.push_back(defaultBlock->getStart());
+  labs.push_back(0);		// Default has no meaningful label
+  if (defaultBlock != headBlock->getOut(1 - chain[0].caseEdge)) {
+    // Default is not already a direct out-edge of head (happens when chain has > 1 entry)
+    bblocks.addEdge(headBlock,defaultBlock);
+  }
+
+  // Step 2: Remove the chain edge from headBlock to the second CMP block
+  if (chain.size() > 1) {
+    int4 chainEdge = 1 - chain[0].caseEdge;
+    FlowBlock *cmp1 = headBlock->getOut(chainEdge);
+    bblocks.removeEdge(headBlock,cmp1);
+  }
+
+  // Step 3: Remove edges from intermediate CMP blocks and destroy their branch ops
+  for(int4 i=1;i<(int4)chain.size();++i) {
+    BlockBasic *cmpBlock = chain[i].cmpBlock;
+    // Destroy the CBRANCH first (so the block doesn't have a branch with wrong out-edge count)
+    PcodeOp *cbranch = cmpBlock->lastOp();
+    if (cbranch != (PcodeOp *)0 && cbranch->code() == CPUI_CBRANCH)
+      data.opDestroy(cbranch);
+
+    // Remove out-edges (case body edge was moved to head; chain edge goes to next or default)
+    while(cmpBlock->sizeOut() > 0) {
+      FlowBlock *target = cmpBlock->getOut(0);
+      bblocks.removeEdge(cmpBlock,target);
+    }
+    // Remove in-edge (from previous CMP block in chain)
+    while(cmpBlock->sizeIn() > 0) {
+      FlowBlock *source = cmpBlock->getIn(0);
+      bblocks.removeEdge(source,cmpBlock);
+    }
+  }
+
+  // Step 4: Replace the CBRANCH in headBlock with a BRANCHIND
+  // The CBRANCH has inputs: [target_addr, boolean_condition]
+  // The BRANCHIND has inputs: [switch_variable]
+  data.opRemoveInput(firstCbranch,1);	// Remove boolean condition input
+  data.opSetInput(firstCbranch,switchVn,0);	// Set input 0 to switch variable
+  data.opSetOpcode(firstCbranch,CPUI_BRANCHIND);
+
+  // Step 5: Create and register the JumpTable
+  JumpTable *jt = new JumpTable(headBlock->getStart());
+  jt->setIndirectOp(firstCbranch);
+  jt->initSparse(firstCbranch,addrs,labs);
+  data.addJumpTable(jt);
+
+  // Step 7: Reset the structuring so it picks up the new switch
+  data.getStructure().clear();
+}
+
+int4 ActionSparseSwitch::apply(Funcdata &data)
+
+{
+  const BlockGraph &bblocks = data.getBasicBlocks();
+  vector<ChainEntry> chain;
+  BlockBasic *defaultBlock;
+
+  for(int4 i=0;i<bblocks.getSize();++i) {
+    BlockBasic *bb = (BlockBasic *)bblocks.getBlock(i);
+    if (bb->isDead()) continue;
+    if (bb->sizeOut() != 2) continue;
+    if (bb->isSwitchOut()) continue;	// Already recognized as a switch
+
+    if (detectChain(bb,chain,defaultBlock)) {
+      transformToSwitch(data,chain,defaultBlock);
+      count += 1;
+      break;		// Block graph was modified, let the action framework re-run us
+    }
+  }
+  return 0;
+}
+
 int4 ActionSwitchNorm::apply(Funcdata &data)
 
 {
@@ -5692,6 +5928,7 @@ void ActionDatabase::universalAction(Architecture *conf)
     actfullloop->addAction( new ActionDirectWrite("protorecovery_b", false) );
     actfullloop->addAction( new ActionDeadCode("deadcode") );
     actfullloop->addAction( new ActionDoNothing("deadcontrolflow") );
+    actfullloop->addAction( new ActionSparseSwitch("switchnorm") );
     actfullloop->addAction( new ActionSwitchNorm("switchnorm") );
     actfullloop->addAction( new ActionReturnSplit("returnsplit") );
     actfullloop->addAction( new ActionUnjustifiedParams("protorecovery") );
