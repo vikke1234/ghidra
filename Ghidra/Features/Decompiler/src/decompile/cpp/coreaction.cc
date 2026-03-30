@@ -4702,65 +4702,62 @@ void ActionSparseSwitch::transformToSwitch(Funcdata &data,vector<ChainEntry> &ch
   // condOp is the INT_EQUAL/INT_NOTEQUAL; get the variable operand
   Varnode *switchVn = condOp->getIn(0)->isConstant() ? condOp->getIn(1) : condOp->getIn(0);
 
-  // Step 1: Add edges from headBlock to case bodies that aren't already direct out-edges,
-  //         and to the default block.  Collect addresses and labels in order.
+  // Step 1: Convert headBlock's CBRANCH to BRANCHIND before any edge changes.
+  //         CBRANCH inputs: [target_addr, boolean_condition]
+  //         BRANCHIND inputs: [switch_variable]
+  data.opRemoveInput(firstCbranch,1);
+  data.opSetInput(firstCbranch,switchVn,0);
+  data.opSetOpcode(firstCbranch,CPUI_BRANCHIND);
+  // BRANCHIND is not destroyed by removeBranch (only CBRANCH is destroyed when sizeOut drops to 1)
+
+  // Step 2: Remove the chain edge from headBlock to the second CMP block.
+  //         After this, headBlock has 1 out-edge (to chain[0].caseBody).
+  //         Use raw removeEdge here since BRANCHIND won't be destroyed (only CBRANCH is).
+  bblocks.removeEdge(headBlock,(FlowBlock *)chain[1].cmpBlock);
+
+  // Step 3: Remove intermediate CMP blocks properly using removeBranch
+  //         (handles MULTIEQUAL patching in target blocks).
+  //         Process in reverse order so chain edges are still valid.
+  for(int4 i=(int4)chain.size()-1;i>=1;--i) {
+    BlockBasic *cmpBlock = chain[i].cmpBlock;
+    // removeBranch removes one out-edge, patches MULTIEQUALs, and destroys the CBRANCH
+    // when sizeOut goes from 2 to 1.
+    // Remove the case body edge first.
+    data.removeBranch(cmpBlock,chain[i].caseEdge);
+    // Now cmpBlock has sizeOut==1 and the CBRANCH is destroyed. Remove remaining edge.
+    if (cmpBlock->sizeOut() > 0)
+      data.removeBranch(cmpBlock,0);
+    // Remove in-edge (from previous CMP block in chain)
+    while(cmpBlock->sizeIn() > 0)
+      bblocks.removeEdge(cmpBlock->getIn(0),cmpBlock);
+  }
+
+  // Step 4: Add edges from headBlock to all case targets and default.
+  //         headBlock currently has 1 out-edge (to chain[0].caseBody).
+  //         Collect addresses and labels matching the out-edge order.
   vector<Address> addrs;
   vector<uintb> labs;
 
-  // First entry: headBlock's own case body (already has an edge)
+  // First entry: headBlock's existing edge to chain[0].caseBody (position 0)
   addrs.push_back(chain[0].caseBody->getStart());
   labs.push_back(chain[0].caseLabel);
 
-  // Remaining entries: add new edges from headBlock
+  // Add edges for remaining case bodies
   for(int4 i=1;i<(int4)chain.size();++i) {
     addrs.push_back(chain[i].caseBody->getStart());
     labs.push_back(chain[i].caseLabel);
     bblocks.addEdge(headBlock,chain[i].caseBody);
   }
 
-  // Default block as last entry
+  // Add default block as last entry
   addrs.push_back(defaultBlock->getStart());
-  labs.push_back(0);		// Default has no meaningful label
-  if (defaultBlock != headBlock->getOut(1 - chain[0].caseEdge)) {
-    // Default is not already a direct out-edge of head (happens when chain has > 1 entry)
-    bblocks.addEdge(headBlock,defaultBlock);
-  }
+  labs.push_back(0);
+  bblocks.addEdge(headBlock,defaultBlock);
 
-  // Step 2: Remove the chain edge from headBlock to the second CMP block
-  if (chain.size() > 1) {
-    int4 chainEdge = 1 - chain[0].caseEdge;
-    FlowBlock *cmp1 = headBlock->getOut(chainEdge);
-    bblocks.removeEdge(headBlock,cmp1);
-  }
+  // Step 5: Mark the default edge (last out-edge)
+  headBlock->setDefaultSwitch(headBlock->sizeOut()-1);
 
-  // Step 3: Remove edges from intermediate CMP blocks and destroy their branch ops
-  for(int4 i=1;i<(int4)chain.size();++i) {
-    BlockBasic *cmpBlock = chain[i].cmpBlock;
-    // Destroy the CBRANCH first (so the block doesn't have a branch with wrong out-edge count)
-    PcodeOp *cbranch = cmpBlock->lastOp();
-    if (cbranch != (PcodeOp *)0 && cbranch->code() == CPUI_CBRANCH)
-      data.opDestroy(cbranch);
-
-    // Remove out-edges (case body edge was moved to head; chain edge goes to next or default)
-    while(cmpBlock->sizeOut() > 0) {
-      FlowBlock *target = cmpBlock->getOut(0);
-      bblocks.removeEdge(cmpBlock,target);
-    }
-    // Remove in-edge (from previous CMP block in chain)
-    while(cmpBlock->sizeIn() > 0) {
-      FlowBlock *source = cmpBlock->getIn(0);
-      bblocks.removeEdge(source,cmpBlock);
-    }
-  }
-
-  // Step 4: Replace the CBRANCH in headBlock with a BRANCHIND
-  // The CBRANCH has inputs: [target_addr, boolean_condition]
-  // The BRANCHIND has inputs: [switch_variable]
-  data.opRemoveInput(firstCbranch,1);	// Remove boolean condition input
-  data.opSetInput(firstCbranch,switchVn,0);	// Set input 0 to switch variable
-  data.opSetOpcode(firstCbranch,CPUI_BRANCHIND);
-
-  // Step 5: Create and register the JumpTable
+  // Step 6: Create and register the JumpTable
   JumpTable *jt = new JumpTable(headBlock->getStart());
   jt->setIndirectOp(firstCbranch);
   jt->initSparse(firstCbranch,addrs,labs);
