@@ -621,6 +621,7 @@ public:
 /// detects the chain and transforms it into a single BRANCHIND with a JumpTable.
 /// This allows the normal switch structuring machinery to handle it.
 class ActionSparseSwitch : public Action {
+public:
   static const int4 MIN_SPARSE_CASES;		///< Minimum number of cases to recognize as a switch
   /// \brief Information about one comparison block in the chain
   struct ChainEntry {
@@ -632,7 +633,6 @@ class ActionSparseSwitch : public Action {
   static Varnode *traceVarnodeBack(Varnode *vn);	///< Trace a Varnode back through COPY operations
   static bool detectChain(BlockBasic *head,vector<ChainEntry> &chain,BlockBasic *&defaultBlock);
   static void transformToSwitch(Funcdata &data,vector<ChainEntry> &chain,BlockBasic *defaultBlock);
-public:
   ActionSparseSwitch(const string &g) : Action(0,"sparseswitch",g) {}	///< Constructor
   virtual Action *clone(const ActionGroupList &grouplist) const {
     if (!grouplist.contains(getGroup())) return (Action *)0;

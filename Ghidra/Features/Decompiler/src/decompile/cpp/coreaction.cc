@@ -4556,7 +4556,7 @@ int4 ActionConditionalConst::apply(Funcdata &data)
   return 0;
 }
 
-const int4 ActionSparseSwitch::MIN_SPARSE_CASES = 3;
+const int4 ActionSparseSwitch::MIN_SPARSE_CASES = 7;
 
 /// Trace a Varnode back through COPY and INT_ZEXT operations to find the original variable.
 /// \param vn is the Varnode to trace
@@ -4710,24 +4710,21 @@ void ActionSparseSwitch::transformToSwitch(Funcdata &data,vector<ChainEntry> &ch
   data.opSetOpcode(firstCbranch,CPUI_BRANCHIND);
   // BRANCHIND is not destroyed by removeBranch (only CBRANCH is destroyed when sizeOut drops to 1)
 
-  // Step 2: Remove the chain edge from headBlock to the second CMP block.
-  //         After this, headBlock has 1 out-edge (to chain[0].caseBody).
-  //         Use raw removeEdge here since BRANCHIND won't be destroyed (only CBRANCH is).
+  // Step 2: Disconnect intermediate CMP blocks from the graph.
+  //         All targets in the chain have sizeIn==1 (checked in detectChain), so there
+  //         are no MULTIEQUALs to patch — raw removeEdge is sufficient.
+  //         Destroy each intermediate CBRANCH directly to avoid removeBranch, which
+  //         calls structureReset on every invocation.
+  //         The disconnected blocks (with their remaining non-branch PcodeOps) will be
+  //         properly cleaned up by ActionUnreachable on the next pass through actmainloop.
   bblocks.removeEdge(headBlock,(FlowBlock *)chain[1].cmpBlock);
-
-  // Step 3: Remove intermediate CMP blocks properly using removeBranch
-  //         (handles MULTIEQUAL patching in target blocks).
-  //         Process in reverse order so chain edges are still valid.
-  for(int4 i=(int4)chain.size()-1;i>=1;--i) {
+  for(int4 i=1;i<(int4)chain.size();++i) {
     BlockBasic *cmpBlock = chain[i].cmpBlock;
-    // removeBranch removes one out-edge, patches MULTIEQUALs, and destroys the CBRANCH
-    // when sizeOut goes from 2 to 1.
-    // Remove the case body edge first.
-    data.removeBranch(cmpBlock,chain[i].caseEdge);
-    // Now cmpBlock has sizeOut==1 and the CBRANCH is destroyed. Remove remaining edge.
-    if (cmpBlock->sizeOut() > 0)
-      data.removeBranch(cmpBlock,0);
-    // Remove in-edge (from previous CMP block in chain)
+    PcodeOp *cbranch = cmpBlock->lastOp();
+    if (cbranch != (PcodeOp *)0 && cbranch->code() == CPUI_CBRANCH)
+      data.opDestroy(cbranch);
+    while(cmpBlock->sizeOut() > 0)
+      bblocks.removeEdge(cmpBlock,cmpBlock->getOut(0));
     while(cmpBlock->sizeIn() > 0)
       bblocks.removeEdge(cmpBlock->getIn(0),cmpBlock);
   }
@@ -4763,7 +4760,9 @@ void ActionSparseSwitch::transformToSwitch(Funcdata &data,vector<ChainEntry> &ch
   jt->initSparse(firstCbranch,addrs,labs);
   data.addJumpTable(jt);
 
-  // Step 7: Reset the structuring so it picks up the new switch
+  // Step 7: Reset the structuring so it picks up the new switch.
+  //         The disconnected intermediate blocks will be cleaned up by ActionUnreachable
+  //         on the next pass through the main action loop.
   data.getStructure().clear();
 }
 

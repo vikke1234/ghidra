@@ -1,0 +1,35 @@
+<decompilertest>
+<binaryimage arch="x86:LE:64:default:gcc">
+<!--
+  Sparse switch: chain of cmp/jne testing the same variable against 7 constants
+  (10, 42, 99, 200, 500, 1000, 9999).  Each match returns a different value; default returns -1.
+  Tests ActionSparseSwitch detection and transformation into a switch statement.
+-->
+<bytechunk space="ram" offset="0x100000" readonly="true">
+83ff0a7506b801000000c383ff2a7506
+b802000000c383ff637506b803000000
+c381ffc80000007506b804000000c381
+fff40100007506b805000000c381ffe8
+0300007506b806000000c381ff0f2700
+007506b807000000c3b8ffffffffc3
+</bytechunk>
+<symbol space="ram" offset="0x100000" name="sparse_switch"/>
+</binaryimage>
+<script>
+  <com>option readonly on</com>
+  <com>parse line extern int4 sparse_switch(int4 param_1);</com>
+  <com>lo fu sparse_switch</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>quit</com>
+</script>
+<stringmatch name="Sparse Switch #1" min="1" max="1">switch\(param_1\)</stringmatch>
+<stringmatch name="Sparse Switch #2" min="1" max="1">case 10:</stringmatch>
+<stringmatch name="Sparse Switch #3" min="1" max="1">case 0x2a:</stringmatch>
+<stringmatch name="Sparse Switch #4" min="1" max="1">case 99:</stringmatch>
+<stringmatch name="Sparse Switch #5" min="1" max="1">case 200:</stringmatch>
+<stringmatch name="Sparse Switch #6" min="1" max="1">case 500:</stringmatch>
+<stringmatch name="Sparse Switch #7" min="1" max="1">case 1000:</stringmatch>
+<stringmatch name="Sparse Switch #8" min="1" max="1">case 9999:</stringmatch>
+<stringmatch name="Sparse Switch #9" min="1" max="1">default:</stringmatch>
+</decompilertest>
