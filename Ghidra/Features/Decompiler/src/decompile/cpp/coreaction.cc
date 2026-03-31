@@ -4655,6 +4655,18 @@ bool ActionSparseSwitch::detectChain(BlockBasic *head,vector<ChainEntry> &chain,
     // Case body must only be reachable from this comparison
     if (caseBody->sizeIn() != 1) break;
 
+    // Verify the block is a pure comparison: only the INT_EQUAL/INT_NOTEQUAL,
+    // possibly a BOOL_NEGATE, and the CBRANCH.  If the block contains other ops
+    // (e.g. STOREs, CALLs, or other side effects), it is not safe to disconnect.
+    {
+      int4 expectedOps = 2;		// INT_EQUAL + CBRANCH
+      if (negated) expectedOps = 3;	// + BOOL_NEGATE
+      int4 actualOps = 0;
+      for (list<PcodeOp *>::const_iterator oiter = cur->beginOp(); oiter != cur->endOp(); ++oiter)
+        actualOps += 1;
+      if (actualOps != expectedOps) break;
+    }
+
     ChainEntry entry;
     entry.cmpBlock = cur;
     entry.caseBody = caseBody;
