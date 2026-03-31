@@ -4756,9 +4756,10 @@ void ActionSparseSwitch::transformToSwitch(Funcdata &data,vector<ChainEntry> &ch
     bblocks.addEdge(headBlock,chain[i].caseBody);
   }
 
-  // Add default block as last entry
+  // Add default block as last entry.
+  // Use max label so default sorts after all real cases in CaseOrder::compare.
   addrs.push_back(defaultBlock->getStart());
-  labs.push_back(0);
+  labs.push_back(calc_mask(switchVn->getSize()));
   bblocks.addEdge(headBlock,defaultBlock);
 
   // Step 5: Mark the default edge (last out-edge)
