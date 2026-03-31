@@ -4710,33 +4710,44 @@ void ActionSparseSwitch::transformToSwitch(Funcdata &data,vector<ChainEntry> &ch
   data.opSetOpcode(firstCbranch,CPUI_BRANCHIND);
   // BRANCHIND is not destroyed by removeBranch (only CBRANCH is destroyed when sizeOut drops to 1)
 
-  // Step 2: Disconnect intermediate CMP blocks from the graph.
+  // Step 2: Disconnect intermediate CMP blocks and destroy all their PcodeOps.
   //         All targets in the chain have sizeIn==1 (checked in detectChain), so there
-  //         are no MULTIEQUALs to patch — raw removeEdge is sufficient for most blocks.
-  //         Use removeBranch for the last intermediate block to trigger exactly one
-  //         structureReset, which is needed for removeUnreachableBlocks in Step 7.
-  bblocks.removeEdge(headBlock,(FlowBlock *)chain[1].cmpBlock);
+  //         are no MULTIEQUALs to patch — raw removeEdge is sufficient.
+  //         We destroy all ops (not just the CBRANCH) to sever any data-flow references
+  //         to live blocks before removeUnreachableBlocks runs.  This prevents
+  //         "Creating undefined varnodes in (possibly) reachable block" warnings.
+  //         Use removeBranch on the last block to trigger exactly one structureReset.
+  bblocks.removeEdge(headBlock, (FlowBlock *)chain[1].cmpBlock);
   int4 lastIntermediate = (int4)chain.size() - 1;
-  for(int4 i=1;i<lastIntermediate;++i) {
+  for (int4 i = 1; i < lastIntermediate; ++i) {
     BlockBasic *cmpBlock = chain[i].cmpBlock;
-    PcodeOp *cbranch = cmpBlock->lastOp();
-    if (cbranch != (PcodeOp *)0 && cbranch->code() == CPUI_CBRANCH)
-      data.opDestroy(cbranch);
-    while(cmpBlock->sizeOut() > 0)
-      bblocks.removeEdge(cmpBlock,cmpBlock->getOut(0));
-    while(cmpBlock->sizeIn() > 0)
-      bblocks.removeEdge(cmpBlock->getIn(0),cmpBlock);
+    while (cmpBlock->sizeOut() > 0)
+      bblocks.removeEdge(cmpBlock, cmpBlock->getOut(0));
+    while (cmpBlock->sizeIn() > 0)
+      bblocks.removeEdge(cmpBlock->getIn(0), cmpBlock);
+    // Destroy all ops in the now-isolated block
+    list<PcodeOp *>::iterator oiter = cmpBlock->beginOp();
+    while (oiter != cmpBlock->endOp()) {
+      PcodeOp *op = *oiter;
+      ++oiter;
+      data.opDestroy(op);
+    }
   }
-  // Last intermediate block: use removeBranch (triggers one structureReset).
-  // removeBranch on a block with sizeOut==2 destroys the CBRANCH and removes one edge.
+  // Last intermediate block: use removeBranch to trigger one structureReset,
+  // which is needed for removeUnreachableBlocks in Step 7.
   {
     BlockBasic *lastCmp = chain[lastIntermediate].cmpBlock;
-    data.removeBranch(lastCmp,chain[lastIntermediate].caseEdge);
-    // CBRANCH is now destroyed, sizeOut==1.  Remove remaining edge.
+    data.removeBranch(lastCmp, chain[lastIntermediate].caseEdge);
     if (lastCmp->sizeOut() > 0)
-      data.removeBranch(lastCmp,0);
-    while(lastCmp->sizeIn() > 0)
-      bblocks.removeEdge(lastCmp->getIn(0),lastCmp);
+      data.removeBranch(lastCmp, 0);
+    while (lastCmp->sizeIn() > 0)
+      bblocks.removeEdge(lastCmp->getIn(0), lastCmp);
+    list<PcodeOp *>::iterator oiter = lastCmp->beginOp();
+    while (oiter != lastCmp->endOp()) {
+      PcodeOp *op = *oiter;
+      ++oiter;
+      data.opDestroy(op);
+    }
   }
 
   // Step 4: Add edges from headBlock to all case targets and default.
