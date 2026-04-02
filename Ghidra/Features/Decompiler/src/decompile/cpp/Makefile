@@ -213,13 +213,20 @@ ifeq ($(MAKECMDGOALS),link_extensions_hard)
 	DEPNAMES=
 endif
 
+# Rebuild objects when compiler flags change.  The .flags file stores the
+# last-used flags; if they differ the sentinel is updated, forcing a rebuild
+# of every object that depends on it.
+TEST_ALL_FLAGS := $(CXX) $(ARCH_TYPE) $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(TEST_DEBUG)
+test_dbg/.flags: FORCE | test_dbg
+	@echo '$(TEST_ALL_FLAGS)' | cmp -s - $@ || echo '$(TEST_ALL_FLAGS)' > $@
+
 com_dbg/%.o:	%.cc
 	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(COMMANDLINE_DEBUG) $< -o $@
 com_opt/%.o:	%.cc
 	$(CXX) $(ARCH_TYPE) -c $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(COMMANDLINE_OPT)   $< -o $@
-test_dbg/%.o:	%.cc
+test_dbg/%.o:	%.cc test_dbg/.flags
 	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(TEST_DEBUG)        $< -o $@
-test_dbg/%.o:	../unittests/%.cc
+test_dbg/%.o:	../unittests/%.cc test_dbg/.flags
 	$(CXX) -I. $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(TEST_DEBUG)        $< -o $@
 ghi_dbg/%.o:	%.cc
 	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(GHIDRA_DEBUG)      $< -o $@
@@ -400,8 +407,12 @@ include $(DEPNAMES)
 doc:
 	doxygen Doxyfile
 
+FORCE:
+.PHONY: FORCE
+
 clean:
 	rm -f com_dbg/*.o com_opt/*.o test_dbg/*.o ghi_dbg/*.o ghi_opt/*.o sla_dbg/*.o sla_opt/*.o
+	rm -f test_dbg/.flags
 	rm -f *.gcov com_dbg/*.gcno com_dbg/*.gcda
 
 resetgcov:
