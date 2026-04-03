@@ -10,14 +10,20 @@ Native C++ decompilation engine used by Ghidra.
 
 ## Prerequisites
 
-- g++ with C++11 support
+Linux/macOS (Makefile):
+- g++ or clang++ with C++11 support
 - libbfd-dev (binutils development headers)
 - zlib (libz)
 - bison, flex (for grammar regeneration only)
 
-## Building
+Windows/cross-platform (CMake):
+- CMake 3.10+
+- Visual Studio 2017+ or MinGW g++
+- zlib
 
-All build commands are run from `src/decompile/cpp/`.
+## Building (Makefile, Linux/macOS)
+
+All Makefile commands are run from `src/decompile/cpp/`.
 
     make decomp_dbg          # Command-line decompiler (debug)
     make decomp_opt          # Command-line decompiler (optimized)
@@ -117,6 +123,24 @@ TEST(my_test_name) {
 
 } // namespace ghidra
 ```
+
+## Building (CMake, Windows/cross-platform)
+
+CMake builds from `src/decompile/cpp/`. On Windows, BFD-dependent files are
+excluded automatically; the command-line decompiler cannot load raw binaries
+but the full test suite works via XML datatests.
+
+    cd src/decompile/cpp
+    cmake -B build                                 # Linux/macOS
+    cmake -B build -G "Visual Studio 17 2022"      # Windows MSVC
+    cmake --build build --target decomp_test        # Build test runner
+    cd build && ctest                               # Run tests
+
+Set `SLEIGHHOME` to the Ghidra source root so tests can find processor specs:
+
+    set SLEIGHHOME=C:\path\to\ghidra               # Windows cmd
+    $env:SLEIGHHOME = "C:\path\to\ghidra"           # PowerShell
+    export SLEIGHHOME=/path/to/ghidra               # Unix
 
 ## Command-Line Decompiler
 
