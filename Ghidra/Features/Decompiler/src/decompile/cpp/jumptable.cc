@@ -2621,7 +2621,15 @@ void JumpTable::initSparse(PcodeOp *ind,const vector<Address> &addrs,const vecto
   opaddress = ind->getAddr();
   addresstable = addrs;
   label = labs;
-  switchVarConsume = ~((uintb)0);
+  // Compute the minimal consume mask from the actual case labels,
+  // matching what the normal recovery path does in recoverAddresses.
+  // This helps dead code elimination and type propagation converge.
+  {
+    uintb maxLabel = 0;
+    for (int4 i = 0; i < (int4)labs.size(); ++i)
+      maxLabel |= labs[i];
+    switchVarConsume = minimalmask(maxLabel);
+  }
   partialTable = false;
   collectloads = false;
   defaultIsFolded = false;
